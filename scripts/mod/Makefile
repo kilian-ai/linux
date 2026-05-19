@@ -6,6 +6,10 @@ hostprogs-always-y	+= modpost mk_elfconfig
 always-y		+= empty.o
 
 modpost-objs	:= modpost.o file2alias.o sumversion.o
+# file2alias.c defines its own uuid_t struct; prevent macOS from redefining it
+HOSTCFLAGS_file2alias.o	:= -include /tmp/elfstub/uuid_fix.h
+HOSTCFLAGS_modpost.o	:= -include /tmp/elfstub/uuid_fix.h
+HOSTCFLAGS_sumversion.o	:= -include /tmp/elfstub/uuid_fix.h
 
 devicetable-offsets-file := devicetable-offsets.h
 
