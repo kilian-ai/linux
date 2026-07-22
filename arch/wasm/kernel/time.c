@@ -1,5 +1,7 @@
 #include <linux/clockchips.h>
 #include <linux/clocksource.h>
+#include <linux/ktime.h>
+#include <linux/timekeeping.h>
 #include <linux/cpuhotplug.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -48,6 +50,82 @@ unsigned long long sched_clock(void)
 	if (!origin)
 		origin = wasm_kernel_get_now_nsec();
 	return wasm_kernel_get_now_nsec() - origin;
+}
+
+/*
+ * wasm_kernel_get_now_nsec() is Unix-epoch based (performance.timeOrigin +
+ * performance.now() on the JS side), so use it to set the wall clock at
+ * late boot; without this the guest wall clock starts at 1970.
+ * Deliberately NOT implemented as read_persistent_clock64(): feeding the
+ * epoch offset into timekeeping_init makes long (>2s) timer wakeups never
+ * fire (verified empirically — relative nanosleep hangs, absolute expiry
+ * fires instantly). Setting the time after timekeeping is fully up behaves.
+ */
+extern u64 wasm_clock_origins[2];
+
+static int __init wasm_set_wall_clock(void)
+{
+	struct timespec64 ts = ns_to_timespec64(wasm_kernel_get_now_nsec());
+	int ret = do_settimeofday64(&ts);
+	u64 raw = wasm_kernel_get_now_nsec();
+
+	wasm_clock_origins[0] = raw - ktime_get_ns();
+	wasm_clock_origins[1] = raw - ktime_get_real_ns();
+
+	pr_info("wasm: set wall clock to %lld.%09ld: ret=%d (real now %lld)\n",
+		(long long)ts.tv_sec, ts.tv_nsec, ret, ktime_get_real_ns());
+	return ret;
+}
+/*
+ * device_initcall, not late_initcall: this port's do_initcalls() only runs
+ * levels 0-6 (init/main.c iterates ARRAY_SIZE(initcall_level_names) - 1
+ * over exactly 8 levels), so level 7 "late" initcalls never execute.
+ */
+device_initcall(wasm_set_wall_clock);
+
+/*
+ * Exported for the JS syscall shim: userspace clock_gettime is serviced in
+ * JS (see worker.js nr=403), and absolute deadlines passed back into the
+ * kernel (clock_nanosleep TIMER_ABSTIME, futex timed waits) are only
+ * meaningful if userspace sees the kernel's own clocks. Safe to call from
+ * any worker's vmlinux instance: ktime readers take the timekeeping seqlock.
+ *
+ * NOTE: only call these from a worker whose kernel instance is inside a
+ * proper task context. pthread-clone child workers never enter the kernel
+ * (switch_entry runs user code directly), so their instance's shadow stack
+ * pointer still points at init_stack — running any non-leaf kernel C from
+ * there scribbles over CPU 0's idle stack. For those contexts the JS shim
+ * instead reads wasm_clock_origins[] below straight out of kernel memory.
+ */
+__attribute__((export_name("get_monotonic_ns"))) u64
+wasm_get_monotonic_ns(void)
+{
+	return ktime_get_ns();
+}
+
+__attribute__((export_name("get_real_ns"))) u64
+wasm_get_real_ns(void)
+{
+	return ktime_get_real_ns();
+}
+
+/*
+ * Clock origins for stack-free clock recovery from JS:
+ *   [0] = raw - CLOCK_MONOTONIC    [1] = raw - CLOCK_REALTIME
+ * where raw = wasm_kernel_get_now_nsec() (the clocksource, 1:1 ns), so
+ *   CLOCK_x(now) = raw(now) - origin[x]
+ * holds for the whole boot (no NTP here to perturb the clocksource mult).
+ * JS computes raw itself (performance.timeOrigin + performance.now() —
+ * identical across workers) and only reads this array from kernel memory.
+ * The address-getter below compiles to a bare i32.const: safe to call from
+ * any instance, including ones with no usable shadow stack.
+ */
+u64 wasm_clock_origins[2];
+
+__attribute__((export_name("get_clock_origins"))) u64 *
+wasm_get_clock_origins(void)
+{
+	return wasm_clock_origins;
 }
 
 static u64 clock_read(struct clocksource *cs)
