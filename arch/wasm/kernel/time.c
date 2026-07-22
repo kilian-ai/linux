@@ -53,35 +53,30 @@ unsigned long long sched_clock(void)
 }
 
 /*
- * wasm_kernel_get_now_nsec() is Unix-epoch based (performance.timeOrigin +
- * performance.now() on the JS side), so use it to set the wall clock at
- * late boot; without this the guest wall clock starts at 1970.
- * Deliberately NOT implemented as read_persistent_clock64(): feeding the
- * epoch offset into timekeeping_init makes long (>2s) timer wakeups never
- * fire (verified empirically — relative nanosleep hangs, absolute expiry
- * fires instantly). Setting the time after timekeeping is fully up behaves.
+ * The guest wall clock is deliberately NOT set from the kernel. Setting it
+ * via do_settimeofday64() in an initcall empirically breaks inbound TCP:
+ * injected connections stall in SYN-RECV (the guest retransmits SYN-ACK and
+ * ignores the final ACK). A runtime settimeofday from userspace is fine, so
+ * /etc/init.d/rcS sets the clock from the lot_epoch= kernel cmdline value
+ * (written by wasm.html at boot). The JS syscall shim keeps
+ * wasm_clock_origins[1] in sync when userspace sets the clock.
  */
 extern u64 wasm_clock_origins[2];
 
-static int __init wasm_set_wall_clock(void)
+static int __init wasm_publish_clock_origins(void)
 {
-	struct timespec64 ts = ns_to_timespec64(wasm_kernel_get_now_nsec());
-	int ret = do_settimeofday64(&ts);
 	u64 raw = wasm_kernel_get_now_nsec();
 
 	wasm_clock_origins[0] = raw - ktime_get_ns();
 	wasm_clock_origins[1] = raw - ktime_get_real_ns();
-
-	pr_info("wasm: set wall clock to %lld.%09ld: ret=%d (real now %lld)\n",
-		(long long)ts.tv_sec, ts.tv_nsec, ret, ktime_get_real_ns());
-	return ret;
+	return 0;
 }
 /*
  * device_initcall, not late_initcall: this port's do_initcalls() only runs
  * levels 0-6 (init/main.c iterates ARRAY_SIZE(initcall_level_names) - 1
  * over exactly 8 levels), so level 7 "late" initcalls never execute.
  */
-device_initcall(wasm_set_wall_clock);
+device_initcall(wasm_publish_clock_origins);
 
 /*
  * Exported for the JS syscall shim: userspace clock_gettime is serviced in
