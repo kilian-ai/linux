@@ -23,6 +23,9 @@ u64 wasm_get_timer_deadline(void)
 	return __this_cpu_read(timer_deadline_ns);
 }
 
+extern int wasm_sched_trace;
+void wasm_ktrace(const char *s, int n);
+
 void __cpuidle arch_cpu_idle(void)
 {
 	atomic64_t *pending = this_cpu_ptr(&irq_pending);
@@ -30,6 +33,14 @@ void __cpuidle arch_cpu_idle(void)
 	u64 now;
 	s64 timeout_ns;
 	int ret;
+
+	if (wasm_sched_trace) {
+		char b[80];
+		int n = snprintf(b, sizeof(b), "@K@IDLE cpu=%d\n",
+				 raw_smp_processor_id());
+		if (n > 0)
+			wasm_ktrace(b, n);
+	}
 
 	if (deadline == 0) {
 		timeout_ns = -1; // forever

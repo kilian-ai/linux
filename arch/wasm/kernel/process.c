@@ -13,6 +13,42 @@ struct task_bootstrap_args {
 	void *fn_arg;
 };
 
+/* ── sched-trace harness ──────────────────────────────────────────────────
+ * Lines prefixed "@K@" are routed to the host debug log by wasm.js's
+ * boot_console_write shim (survives a guest wedge). Tracing auto-arms the
+ * first time a python3/futexpp task is switched, and self-limits to a budget
+ * so it can't flood. Off = zero overhead. */
+int wasm_sched_trace;
+int wasm_sched_trace_budget = 6000;
+
+void wasm_ktrace(const char *s, int n)
+{
+	if (wasm_sched_trace_budget <= 0)
+		return;
+	wasm_sched_trace_budget--;
+	wasm_kernel_boot_console_write(s, n);
+}
+
+static void ktrace_switch(struct task_struct *from, struct task_struct *to,
+			  int cpu)
+{
+	char b[160];
+	int n;
+	if (!wasm_sched_trace) {
+		if (!strncmp(to->comm, "python3", 7) ||
+		    !strncmp(from->comm, "python3", 7) ||
+		    !strncmp(to->comm, "futexpp", 7) ||
+		    !strncmp(from->comm, "futexpp", 7))
+			wasm_sched_trace = 1;
+		else
+			return;
+	}
+	n = snprintf(b, sizeof(b), "@K@SW %d:%s -> %d:%s cpu=%d\n", from->pid,
+		     from->comm, to->pid, to->comm, cpu);
+	if (n > 0)
+		wasm_ktrace(b, n);
+}
+
 int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 {
 	*dst = *src;
@@ -30,6 +66,8 @@ struct task_struct *__switch_to(struct task_struct *from,
 
 	cpu = atomic_xchg(&from_info->running_cpu, -1);
 	BUG_ON(cpu < 0); // current process must be scheduled to a cpu
+
+	ktrace_switch(from, to, cpu);
 
 	// give the current cpu to the new worker
 	other_cpu = atomic_cmpxchg(&to_info->running_cpu, -1, cpu);
@@ -142,6 +180,23 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	memset(childregs, 0, sizeof(struct pt_regs));
 
 	atomic_set(&task_thread_info(p)->running_cpu, -1);
+
+	/*
+	 * Propagate the new thread's TLS pointer. Userspace (musl) reads its
+	 * thread pointer — pthread_self(), __get_tp(), errno, all __thread
+	 * access — via the get_thread_area syscall, which returns this task's
+	 * tp_value. pthread_create() hands the child's TLS block to the kernel
+	 * through clone()'s tls argument (CLONE_SETTLS). Without copying it here
+	 * the child inherits the parent's tp_value, so get_thread_area() (hence
+	 * pthread_self()/get_ident()) returns the SAME value for every thread.
+	 * That identity collision corrupts any thread-identity-keyed state
+	 * (Python's threading._active/thread-locals, the GIL, SQLAlchemy's
+	 * connection pool), which deadlocks e.g. FastAPI sync endpoints that
+	 * touch the DB from the anyio threadpool. tls==0 means "no TLS" (fork /
+	 * NOMMU clone), so leave the inherited value alone in that case.
+	 */
+	if (args->tls)
+		task_thread_info(p)->tp_value = args->tls;
 
 	// don't spawn a worker for idle threads
 	// this is probably a bad idea
