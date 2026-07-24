@@ -1,14 +1,61 @@
 #include <asm/wasm_imports.h>
 #include <linux/syscalls.h>
 
-void arch_do_signal_or_restart(struct pt_regs *regs) {
+/*
+ * Signal delivery + syscall restart for wasm.
+ *
+ * A syscall that blocks and is interrupted by a signal returns one of the
+ * -ERESTART* codes. These must never reach userspace: they are an internal
+ * contract between the syscall and signal-delivery code. On a conventional
+ * arch the return-to-user path either rewinds the PC (auto-restart) or
+ * overwrites the return register with -EINTR. wasm cannot rewind userspace,
+ * so the trampoline (wasm_syscall) re-runs the syscall when we set
+ * regs->syscall_restart; here we decide restart vs -EINTR the same way the
+ * generic signal code does, and rewrite regs->syscall_ret for the -EINTR case.
+ */
+void arch_do_signal_or_restart(struct pt_regs *regs)
+{
 	struct ksignal ksig;
+	bool has_handler = get_signal(&ksig);
+	long ret = regs->syscall_ret;
+	bool restart = false;
 
-	if (get_signal(&ksig)) {
-		struct sigaction* sa = &ksig.ka.sa;
-		if (sa->sa_flags&SA_SIGINFO)
+	switch (ret) {
+	case -ERESTARTNOHAND:
+		/* restart only if no handler ran */
+		if (has_handler)
+			regs->syscall_ret = -EINTR;
+		else
+			restart = true;
+		break;
+	case -ERESTARTSYS:
+		/* restart iff no handler, or handler opted in with SA_RESTART */
+		if (has_handler && !(ksig.ka.sa.sa_flags & SA_RESTART))
+			regs->syscall_ret = -EINTR;
+		else
+			restart = true;
+		break;
+	case -ERESTARTNOINTR:
+		/* always restart */
+		restart = true;
+		break;
+	case -ERESTART_RESTARTBLOCK:
+		/* re-enter via sys_restart_syscall (uses the saved restart_block) */
+		if (has_handler) {
+			regs->syscall_ret = -EINTR;
+		} else {
+			regs->syscall_nr = __NR_restart_syscall;
+			restart = true;
+		}
+		break;
+	}
+
+	regs->syscall_restart = restart;
+
+	if (has_handler) {
+		struct sigaction *sa = &ksig.ka.sa;
+		if (sa->sa_flags & SA_SIGINFO)
 			pr_warn("TODO: SA_SIGINFO in signal handler\n");
 		wasm_user_call_signal_handler((uintptr_t)sa->sa_handler, ksig.sig);
 	}
 }
-
