@@ -21,6 +21,8 @@ struct task_bootstrap_args {
 int wasm_sched_trace;
 int wasm_sched_trace_budget = 6000;
 
+void wasm_kdiag_switch(int from_pid, int to_pid); /* irq.c wedge telemetry */
+
 void wasm_ktrace(const char *s, int n)
 {
 	if (wasm_sched_trace_budget <= 0)
@@ -68,6 +70,7 @@ struct task_struct *__switch_to(struct task_struct *from,
 	BUG_ON(cpu < 0); // current process must be scheduled to a cpu
 
 	ktrace_switch(from, to, cpu);
+	wasm_kdiag_switch(from->pid, to->pid);
 
 	// give the current cpu to the new worker
 	other_cpu = atomic_cmpxchg(&to_info->running_cpu, -1, cpu);
