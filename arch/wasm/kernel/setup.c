@@ -28,8 +28,15 @@ static void do_start_kernel(void *unused)
 
 __attribute__((export_name("boot"))) void __init _start(void)
 {
-	static char devicetree[2048];
-	static char initramfs[512];
+	/*
+	 * The page builds the FDT at boot: bootargs carry lot_hosts=/lot_svc=/
+	 * lot_run=/lot_tty=/lot_epoch=, plus one node per virtio device and the
+	 * .linux.sections map. That crept to ~2040 bytes, so a 2 KiB buffer
+	 * failed with "Device tree truncated" on any longer ?hosts= list.
+	 */
+	static char devicetree[16384];
+	/* Reserve enough room for embedded initramfs payload loaded via boot import. */
+	static char initramfs[4 * 1024 * 1024];
 	int node;
 
 	set_current_cpu(0);
