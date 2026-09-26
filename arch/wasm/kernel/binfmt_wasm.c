@@ -316,6 +316,22 @@ restore:
 	return ret;
 }
 
+/*
+ * LinuxOnTab compatibility with the pre-7.1 userspace ABI. Binaries built
+ * against the old musl crt1 fetch their process arguments through two host
+ * imports: get_args_length() (a size query, no side effects) followed by
+ * get_args(buf). The host maps get_args(buf) onto sys_wasm_get_args(buf, n);
+ * this export answers the size query from the pending exec_args, which
+ * sys_wasm_get_args then consumes exactly as it would for a 7.1 binary.
+ */
+__attribute__((export_name("get_args_length"))) int
+wasm_compat_get_args_length(void)
+{
+	struct wasm_exec_args *exec = READ_ONCE(current->mm->context.exec_args);
+
+	return exec ? (int)exec->process_size : -EINVAL;
+}
+
 static int load_wasm_binary(struct linux_binprm *bprm)
 {
 	loff_t offset = 0;

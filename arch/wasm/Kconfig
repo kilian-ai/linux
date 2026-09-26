@@ -88,3 +88,12 @@ config DEFAULT_MEM_START
 	  If unsure, leave the default value here.
 
 source "arch/wasm/drivers/Kconfig"
+
+config ARCH_FORCE_MAX_ORDER
+	int
+	default "14" if PAGE_SIZE_64KB
+	default "11"
+	help
+	  Largest power-of-two page-block the allocator keeps. With 64 KiB
+	  pages, 14 allows 512 MiB contiguous allocations, which loading large
+	  asyncified user binaries (clang, rustc: 70 MB+) needs.
