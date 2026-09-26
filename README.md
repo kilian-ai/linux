@@ -1,3 +1,17 @@
+> **LinuxOnTab fork.** Branch `wasm-linuxontab` of this repository is the
+> GPL-2.0 corresponding source for the kernel binary shipped by
+> [LinuxOnTab 2.0](https://github.com/kilian-ai/linuxontab) at
+> [next.linuxontab.com](https://next.linuxontab.com)
+> (`shell/linux-dist/vmlinux.wasm`). Every shipped binary embeds the exact
+> commit it was built from in a `.linuxontab.source` custom section, and
+> `kernels/vmlinux.source` in the LinuxOnTab repo records the same pointer.
+> Build and ship instructions: [kernels/README.md](https://github.com/kilian-ai/linuxontab/blob/feature/linux-kernel-integration/kernels/README.md).
+> Additions over upstream live under `arch/wasm/` and `tools/wasm/` (syscall
+> restart, futex, kernel clocks for the JS shims, signal-frame save/restore,
+> kdiag boot telemetry, larger devicetree buffer, ARCH_FORCE_MAX_ORDER=14,
+> macOS build fixes). The port itself is Thomas Stokes' work — everything
+> below is the upstream README.
+
 # Linux WebAssembly port
 
 [Try it in your browser.](https://linux.tombl.dev)
