@@ -1,6 +1,7 @@
 {
   "name": "@tombl/linux",
   "version": "0.0.0",
+  "license": "GPL-2.0-only WITH Linux-syscall-note",
   "type": "module",
   "repository": {
     "type": "git",
