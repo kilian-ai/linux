@@ -2,10 +2,12 @@
 #include <asm/sections.h>
 #include <asm/setup.h>
 #include <asm/sysmem.h>
+#include <asm/wasm_imports.h>
 #include <linux/libfdt.h>
 #include <linux/memblock.h>
 #include <linux/of.h>
 #include <linux/of_fdt.h>
+#include <linux/of_platform.h>
 #include <linux/percpu.h>
 #include <linux/sched.h>
 #include <linux/screen_info.h>
@@ -113,3 +115,15 @@ void machine_power_off(void)
 	pr_info("poweroff\n");
 	BUG();
 }
+
+// Deferred platform device discovery from device tree
+// Called later in boot sequence (after kernel stabilized, modules loaded)
+static int __init wasm_of_platform_init(void)
+{
+	pr_info("Discovering platform devices from device tree\n");
+	int rc = of_platform_populate(NULL, of_default_bus_match_table, NULL, NULL);
+	if (rc)
+		pr_warn("of_platform_populate failed: %d\n", rc);
+	return rc;
+}
+subsys_initcall(wasm_of_platform_init);

@@ -9,6 +9,8 @@ struct clone_fn {
 int wasm_call_clone_fn(void *arg)
 {
 	struct clone_fn *clone_fn = arg;
+	pr_info("wasm_call_clone_fn[%d]: fn=%p arg=%p\n",
+		current->pid, clone_fn->fn, clone_fn->arg);
 	wasm_user_switch_entry((uintptr_t)clone_fn->fn,
 			       (uintptr_t)clone_fn->arg);
 	wasm_user_instantiate(false);

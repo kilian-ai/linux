@@ -35,7 +35,8 @@ print "{\n";
 my @stack;
 my $first = 1;
 while (<>) {
-    last if /data\.drop/;
+    # Match the `data.drop` instruction but NOT segment names like $.rodata.drop_reasons
+    last if /^\s+data\.drop\b/ && !/memory\.init/;
 
     if (/i32\.const (\d+)/) {
         push @stack, $1;

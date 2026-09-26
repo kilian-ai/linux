@@ -338,8 +338,10 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 				continue;
 		}
 
-		if (!pipe->writers)
+		if (!pipe->writers) {
+			pr_info("pipe_read[%d]: writers=0 EOF, ret=%zd\n", current->pid, ret);
 			break;
+		}
 		if (ret)
 			break;
 		if (filp->f_flags & O_NONBLOCK) {
@@ -375,8 +377,12 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 		 * since we've done any required wakeups and there's no need
 		 * to mark anything accessed. And we've dropped the lock.
 		 */
+		pr_info("pipe_read[%d]: blocking, writers=%d head=%u tail=%u\n",
+			current->pid, pipe->writers, pipe->head, pipe->tail);
 		if (wait_event_interruptible_exclusive(pipe->rd_wait, pipe_readable(pipe)) < 0)
 			return -ERESTARTSYS;
+		pr_info("pipe_read[%d]: woke up, writers=%d head=%u tail=%u\n",
+			current->pid, pipe->writers, pipe->head, pipe->tail);
 
 		__pipe_lock(pipe);
 		was_full = pipe_full(pipe->head, pipe->tail, pipe->max_usage);
@@ -595,6 +601,8 @@ out:
 	 * Epoll nonsensically wants a wakeup whether the pipe
 	 * was already empty or not.
 	 */
+	pr_info("pipe_write[%d]: done ret=%zd was_empty=%d head=%u tail=%u\n",
+		current->pid, ret, was_empty, pipe->head, pipe->tail);
 	if (was_empty || pipe->poll_usage)
 		wake_up_interruptible_sync_poll(&pipe->rd_wait, EPOLLIN | EPOLLRDNORM);
 	kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
@@ -724,8 +732,11 @@ pipe_release(struct inode *inode, struct file *file)
 	__pipe_lock(pipe);
 	if (file->f_mode & FMODE_READ)
 		pipe->readers--;
-	if (file->f_mode & FMODE_WRITE)
+	if (file->f_mode & FMODE_WRITE) {
 		pipe->writers--;
+		pr_info("pipe_release[%d]: writers now %d readers %d\n",
+			current->pid, pipe->writers, pipe->readers);
+	}
 
 	/* Was that the last reader or writer, but not the other side? */
 	if (!pipe->readers != !pipe->writers) {

@@ -23,7 +23,17 @@ config WASM
 	select PAGE_SIZE_64KB
 	select SMP
 	select THREAD_INFO_IN_TASK
-
+config ARCH_FORCE_MAX_ORDER
+        int
+        default "14" if PAGE_SIZE_64KB
+        default "11"
+        help
+          The kernel memory allocator divides physically contiguous memory
+          blocks into zones, where each zone is a power of two number of
+          pages. This option selects the largest power of two that the
+          kernel keeps in its memory allocator. Setting this higher
+          allows loading larger binaries (e.g. clang at 70MB+ asyncified).
+          With PAGE_SIZE_64KB, default 14 gives max block = 512MB.
 config CMDLINE
 	string "Kernel command string to append"
 	default ""

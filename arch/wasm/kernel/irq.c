@@ -222,8 +222,16 @@ trigger_irq_for_cpu(unsigned int cpu, irq_hw_number_t irq)
 
 	newval = (u64)atomic64_fetch_or(1 << irq, pending) | (1ULL << irq);
 
+	/* Wake EVERY waiter on the pending word, not just one. Both the idle
+	 * loop (which actually runs IRQs) and cpu_relax() spinners wait on this
+	 * same address; notify(1) routinely woke a spinner — which ignores the
+	 * event — while the idle sleeper stayed asleep until its next timer
+	 * deadline. That single-token wake was the guest's "lost wakeup": bulk
+	 * RX degrading to one segment per sender-RTO, downloads wedging, and
+	 * blocked reads sleeping through arriving data. Spuriously woken
+	 * spinners just re-check and re-wait — waking them all is harmless. */
 	woken = __builtin_wasm_memory_atomic_notify((void *)&pending->counter,
-						    /* at most, wake up: */ 1);
+						    /* wake all: */ INT_MAX);
 
 	kd_inc(KD_TRIG_COUNT, 1);
 	kd_inc(KD_TRIG_WOKEN, woken);

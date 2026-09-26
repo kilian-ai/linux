@@ -348,32 +348,51 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
     this.#output = output.getWriter();
   }
 
+  #pendingInput: Uint8Array[] = [];
+  #warnedInputBacklog = false;
+
+  #enqueueInput(chunk: Uint8Array) {
+    if (chunk.length === 0) return;
+    this.#pendingInput.push(chunk.slice());
+  }
+
+  #flushPending(queue: Virtqueue) {
+    let wrote = false;
+    while (this.#pendingInput.length > 0) {
+      const chain = queue[Symbol.iterator]().next().value;
+      if (!chain) {
+        if (!this.#warnedInputBacklog) {
+          console.warn("no more descriptors, queueing console input");
+          this.#warnedInputBacklog = true;
+        }
+        break;
+      }
+
+      const [desc, trailing] = chain;
+      assert(desc && desc.writable, "receiver must be writable");
+      assert(!trailing, "too many descriptors");
+
+      const chunk = this.#pendingInput[0]!;
+      const n = Math.min(chunk.length, desc.array.byteLength);
+      desc.array.set(chunk.subarray(0, n));
+      if (n === chunk.length) this.#pendingInput.shift();
+      else this.#pendingInput[0] = chunk.subarray(n);
+      chain.release(n);
+      wrote = true;
+    }
+
+    if (this.#pendingInput.length === 0) this.#warnedInputBacklog = false;
+    if (wrote) this.trigger_interrupt("vring");
+  }
+
   #writing: Promise<void> | null = null;
   async #writer(queue: Virtqueue) {
-    const queue_iter = queue[Symbol.iterator]();
     const reader = this.#input.getReader();
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      let chunk = value;
-
-      while (chunk.length > 0) {
-        const chain = queue_iter.next().value;
-        if (!chain) {
-          console.warn("no more descriptors, dropping console input");
-          break;
-        }
-
-        const [desc, trailing] = chain;
-        assert(desc && desc.writable, "receiver must be writable");
-        assert(!trailing, "too many descriptors");
-
-        const n = Math.min(chunk.length, desc.array.byteLength);
-        desc.array.set(chunk.subarray(0, n));
-        chunk = chunk.subarray(n);
-        chain.release(n);
-      }
-      this.trigger_interrupt("vring");
+      if (value) this.#enqueueInput(value);
+      this.#flushPending(queue);
     }
   }
 
@@ -384,6 +403,7 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
     switch (vq) {
       case 0:
         this.#writing ??= this.#writer(queue);
+        this.#flushPending(queue);
         break;
       case 1:
         for (const chain of queue) {
@@ -398,6 +418,142 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
         break;
       default:
         console.error("ConsoleDevice: unknown vq", vq);
+    }
+  }
+}
+
+const NetworkDeviceFeatures = {
+  MAC: 1n << 5n,
+} as const;
+
+class NetworkDeviceConfig extends Struct({
+  mac0: U8, mac1: U8, mac2: U8, mac3: U8, mac4: U8, mac5: U8,
+  status: U16LE,
+}) {}
+
+export interface NetworkDeviceBackend {
+  /** Called with each outgoing Ethernet frame the guest sends (TX queue). */
+  send(frame: Uint8Array): void;
+  /** Set by NetworkDevice so the backend can inject frames into the guest (RX). */
+  receive: (frame: Uint8Array) => void;
+}
+
+export class NetworkDevice extends VirtioDevice<NetworkDeviceConfig> {
+  ID = 1;
+  config_bytes = new Uint8Array(NetworkDeviceConfig.size);
+  config = new NetworkDeviceConfig(this.config_bytes);
+
+  #mac: Uint8Array;
+  #backend: NetworkDeviceBackend;
+  #rx_queue_ready = false;
+
+  constructor(mac: Uint8Array, backend: NetworkDeviceBackend) {
+    super();
+    assert(mac.byteLength >= 6, "MAC must be 6 bytes");
+    this.#mac = mac;
+    this.#backend = backend;
+    this.features |= NetworkDeviceFeatures.MAC;
+
+    // Store MAC in config_bytes so kernel reads it from the config space.
+    for (let i = 0; i < 6; i++) (this.config_bytes as any)[i] = mac[i]!;
+
+    // Bind the backend's receive callback to our inject method.
+    backend.receive = (frame: Uint8Array) => this.#injectRx(frame);
+  }
+
+  // Queue of frames waiting for the guest to provide RX descriptors.
+  #rxPending: Uint8Array[] = [];
+
+  // Inject an Ethernet frame into the guest's receive queue.
+  #injectRx(frame: Uint8Array) {
+    const queue = this.vqs[0]; // receiveq
+    if (!queue || !this.#rx_queue_ready) {
+      this.#rxPending.push(frame);
+      return;
+    }
+    this.#drainPending(queue);
+    this.#writeRxFrame(queue, frame);
+  }
+
+  #drainPending(queue: any) {
+    while (this.#rxPending.length > 0) {
+      const f = this.#rxPending[0]!;
+      if (!this.#writeRxFrame(queue, f)) break;
+      this.#rxPending.shift();
+    }
+  }
+
+  // Write a single frame into the RX virtqueue. Returns false if no descriptors available.
+  #writeRxFrame(queue: any, frame: Uint8Array): boolean {
+    // virtio_net_hdr (10 bytes of zeros = no offloading)
+    const HDR = 10;
+    const total = HDR + frame.byteLength;
+
+    for (const chain of queue) {
+      let offset = 0;
+      for (const { array, writable } of chain) {
+        if (!writable) continue;
+        const slice = new Uint8Array(array.buffer, array.byteOffset, array.byteLength);
+        if (offset < HDR) {
+          // write header zeros (already zero)
+          const hdrBytes = Math.min(HDR - offset, slice.byteLength);
+          offset += hdrBytes;
+          const remaining = slice.byteLength - hdrBytes;
+          if (remaining > 0 && frame.byteLength > 0) {
+            const frameBytes = Math.min(frame.byteLength, remaining);
+            slice.set(frame.subarray(0, frameBytes), hdrBytes);
+          }
+        } else {
+          const frameOff = offset - HDR;
+          const n = Math.min(frame.byteLength - frameOff, slice.byteLength);
+          slice.set(frame.subarray(frameOff, frameOff + n));
+        }
+        offset += slice.byteLength;
+      }
+      chain.release(total);
+      this.trigger_interrupt("vring");
+      return true;
+    }
+    return false;
+  }
+
+  override notify(vq: number) {
+    const queue = this.vqs[vq];
+    assert(queue);
+
+    switch (vq) {
+      case 0: // receiveq — guest is providing RX buffers
+        this.#rx_queue_ready = true;
+        this.#drainPending(queue);
+        break;
+
+      case 1: { // transmitq — guest is sending frames
+        for (const chain of queue) {
+          let totalLen = 0;
+          const parts: Uint8Array[] = [];
+          for (const { array, writable } of chain) {
+            assert(!writable, "TX descriptor must be readable");
+            parts.push(array.slice(0)); // copy since SharedArrayBuffer
+            totalLen += array.byteLength;
+          }
+
+          // Strip the 10-byte virtio_net_hdr before handing to backend.
+          const HDR = 10;
+          if (totalLen > HDR) {
+            const full = new Uint8Array(totalLen);
+            let off = 0;
+            for (const p of parts) { full.set(p, off); off += p.byteLength; }
+            this.#backend.send(full.subarray(HDR));
+          }
+
+          chain.release(0);
+        }
+        this.trigger_interrupt("vring");
+        break;
+      }
+
+      default:
+        console.error("NetworkDevice: unknown vq", vq);
     }
   }
 }

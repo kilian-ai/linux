@@ -9,6 +9,8 @@ export {
   type BlockDeviceStorage,
   ConsoleDevice,
   EntropyDevice,
+  NetworkDevice,
+  type NetworkDeviceBackend,
 } from "./virtio.ts";
 
 const resources = (async () => {
@@ -43,7 +45,7 @@ const resources = (async () => {
   };
 })();
 
-const INITCPIO_ADDR = 0x200000;
+const INITCPIO_MIN_ADDR = 0x200000;
 
 export class Machine extends EventEmitter<{ error: ErrorEvent }> {
   #boot_console: TransformStream<Uint8Array, Uint8Array>;
@@ -52,6 +54,7 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
   #memory: WebAssembly.Memory;
   #devices: VirtioDevice[];
   #initcpio?: ArrayBufferView;
+  #initcpioAddr = 0;
 
   memory: Uint8Array;
   devicetree: DeviceTreeNode;
@@ -106,9 +109,14 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
     };
 
     if (this.#initcpio) {
+      const initcpioSize = this.#initcpio.byteLength;
+      const maxAddr = (bytes - initcpioSize - PAGE_SIZE) & ~(PAGE_SIZE - 1);
+      this.#initcpioAddr = Math.max(INITCPIO_MIN_ADDR, maxAddr);
+      assert(this.#initcpioAddr + initcpioSize <= bytes, "Initcpio placement out of bounds");
+
       const chosen = this.devicetree.chosen as DeviceTreeNode;
-      chosen["linux,initrd-start"] = INITCPIO_ADDR;
-      chosen["linux,initrd-end"] = INITCPIO_ADDR + this.#initcpio.byteLength;
+      chosen["linux,initrd-start"] = this.#initcpioAddr;
+      chosen["linux,initrd-end"] = this.#initcpioAddr + initcpioSize;
 
       this.memory.set(
         new Uint8Array(
@@ -116,7 +124,7 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
           this.#initcpio.byteOffset,
           this.#initcpio.byteLength,
         ),
-        INITCPIO_ADDR,
+        this.#initcpioAddr,
       );
     }
 
@@ -135,7 +143,7 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
     const memory_reservations: { address: number; size: number }[] = [];
     if (this.#initcpio) {
       memory_reservations.push({
-        address: INITCPIO_ADDR,
+        address: this.#initcpioAddr,
         size: this.#initcpio.byteLength,
       });
     }
