@@ -1393,8 +1393,13 @@ archprepare: outputmakefile archheaders archscripts scripts include/config/kerne
 	include/generated/compile.h include/generated/autoconf.h \
 	include/generated/rustc_cfg remove-stale-files
 
+# macOS hosts have no <elf.h>, so scripts/mod (modpost) cannot be built
+# there. Without modules nothing needs it for the wasm image (vmlinux.wasm
+# never runs modpost), so skip it on Darwin only; other hosts are unchanged.
+skip-scripts-mod := $(if $(CONFIG_MODULES),,$(filter Darwin,$(shell uname -s)))
+
 prepare0: archprepare
-ifdef CONFIG_MODULES
+ifeq ($(skip-scripts-mod),)
 	$(Q)$(MAKE) $(build)=scripts/mod
 endif
 	$(Q)$(MAKE) $(build)=. prepare
